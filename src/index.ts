@@ -1,12 +1,13 @@
 /**
- * Host half: the expert catalog and the model-facing summon tools.
+ * Host half: the expert catalog and one native delegation tool per expert.
  *
  * Two tools are registered, and the split matters:
  *
  *   `list_experts` lets the model discover what is available and what each
  *   expert is for, without summoning anything. It is cheap and read-only.
  *
- *   `summon_expert` starts one specialist child through `ctx.subagents` and
+ *   Each `expert_<slug>` tool starts one specialist child through the harness's
+ *   own `tool-subagent`, carrying the expert's persona.
  *   returns its answer. The parent session keeps the task, the judgment, and
  *   the final answer; the child contributes one perspective and stops.
  *
@@ -26,9 +27,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-settings'
+import * as toolSubagent from '@deepseek-ai/dsh-tool-subagent'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { EXPERTS, expertBySlug, type ExpertDefinition } from './experts.ts'
 import { WORKFLOWS, workflowById, workflowIds } from './workflows.ts'
 import { SETTINGS_NAMESPACE, settingsSchema } from './contract.ts'
@@ -161,29 +162,6 @@ export function childPersona(expert: ExpertDefinition): string {
   ].join('\n')
 }
 
-/** Build the child's user message from the task and optional background. */
-function childPrompt(task: string, background: string, persona?: string): ContentBlock[] {
-  const body = background === ''
-    ? task
-    : `${task}\n\nBackground (already settled; do not re-litigate it):\n${background}`
-  // A provider without persona support gets the brief at the top of its prompt
-  // instead, separated so it reads as standing instruction rather than as part
-  // of the task.
-  const text = persona === undefined
-    ? body
-    : `${persona}\n\n---\n\n${body}`
-  return [{ type: 'text', text }]
-}
-
-/** Pull plain text out of a child's returned content blocks. */
-function textOf(blocks: readonly ContentBlock[] | undefined): string {
-  if (blocks === undefined) return ''
-  return blocks
-    .map(block => (block.type === 'text' ? block.text : ''))
-    .filter(text => text !== '')
-    .join('')
-}
-
 /** The slugs a caller may summon, for an error message. */
 function knownSlugs(): string {
   return EXPERTS.map(expert => expert.slug).join(', ')
@@ -227,31 +205,47 @@ export function apply(ctx: Context, config: Config = {} as Config): void {
   // them. The order sits just past TOOL_SUBAGENT (2800) in the repository's table,
   // which is the family this belongs to; a third-party plugin cannot take a name from
   // `getSectionOrder`, so the number is written out.
+  // Nine delegation tools each carry the provider's generic description, so the
+  // tool list alone does not distinguish them. This section is what makes them
+  // choosable: it names each expert and the work it owns. That is a comparative
+  // rule, and a tool cannot state when its sibling is the better call.
+  //
+  // Text is a function of scope, so a deployment that never mounts these tools
+  // spends no prompt budget on rules about them.
   ctx.systemPrompt.section({
     name: 'tool:expert-agents',
     order: 2850,
     text: ({ scope }: { scope?: unknown }) => {
       const has = (tool: string): boolean => ctx.tools.get(tool, scope as never) !== undefined
-      if (!has('summon_expert') && !has('plan_workflow')) return ''
+      const available = EXPERTS.filter(expert => has(`expert_${expert.slug}`))
+      if (available.length === 0) return ''
       const lines: string[] = []
-      if (has('plan_workflow') && has('summon_expert')) {
+
+      if (has('plan_workflow')) {
         lines.push(
-          'Use plan_workflow to decide which stages a piece of work needs, and '
-          + 'summon_expert to run one. Reach for plan_workflow when the request is an '
-          + 'outcome rather than a defined task; skip it when the work is one clear '
-          + 'job and summon that expert directly. Planning a two-stage change is '
+          'Call plan_workflow first when the request is an outcome rather than a '
+          + 'defined task: it returns which experts a piece of work needs, in what '
+          + 'order, and what each stage must produce. Skip it when the work is one '
+          + 'clear job and call the expert directly — planning a two-stage change is '
           + 'overhead, not rigour.',
         )
       }
-      if (has('summon_expert')) {
-        lines.push(
-          'An expert is a scoping device, not a sandbox: it runs with the same '
-          + 'privileges you do. Summon one when a task genuinely needs a different '
-          + 'standing brief, not to obtain permission or to split work you can do in '
-          + 'one pass.',
-        )
+
+      lines.push(
+        'Each delegation tool below is named for the standing brief it carries. '
+        + 'Call one when the work genuinely fits that brief. A child does not see '
+        + 'this conversation, so its prompt must stand alone:',
+      )
+      for (const expert of available) {
+        lines.push(`- expert_${expert.slug}: ${expert.description}`)
       }
-      return lines.join(' ')
+
+      lines.push(
+        'An expert is a scoping device, not a sandbox — it runs with your '
+        + 'privileges and cannot grant you permission you lack. Do not delegate to '
+        + 'obtain approval, and do not split work you could finish in one pass.',
+      )
+      return lines.join('\n')
     },
   })
 
@@ -296,7 +290,7 @@ export function apply(ctx: Context, config: Config = {} as Config): void {
       }
 
       return [
-        `The same ${EXPERTS.length} experts are available. Summon one by slug with summon_expert.`,
+        `The same ${EXPERTS.length} experts are available, one tool each: expert_<slug>.`,
         '',
         'slug\tname\tdescription',
         ...EXPERTS.map(expert =>
@@ -387,7 +381,7 @@ export function apply(ctx: Context, config: Config = {} as Config): void {
         ...template.stopConditions.map(condition => `  - ${condition}`),
         '',
         'Everything else you rule on and record. Summon each owned stage with '
-        + 'summon_expert, writing a brief that stands alone: the stage expert does '
+        + 'that expert\'s own tool, writing a brief that stands alone: the stage expert does '
         + 'not see this conversation, and the review and verify stages must not '
         + 'receive the producer narrative, or they inherit its reasoning and '
         + 'approve it.',
@@ -396,111 +390,29 @@ export function apply(ctx: Context, config: Config = {} as Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'summon_expert',
-    description:
-      'Summon one domain expert as a specialist subagent and get its answer. The '
-      + 'expert receives only the task you write, so give it a standalone prompt: '
-      + 'it does not see this conversation. Use list_experts first if you are '
-      + 'unsure which expert fits. The expert answers one question or produces one '
-      + 'artifact and stops; you keep the task context and the final answer, so '
-      + 'verify what it returns before relying on it.',
-    parameters: {
-      expert: {
-        type: 'string',
-        required: true,
-        description: 'The expert slug, from list_experts.',
-      },
-      task: {
-        type: 'string',
-        required: true,
-        description:
-          'The complete, standalone task for the expert. Include the workspace, '
-          + 'the exact artifact or question, and what you want returned.',
-      },
-      context: {
-        type: 'string',
-        description:
-          'Optional background the expert needs but that is not part of the task '
-          + 'itself: decisions already made, constraints, what has been tried.',
-      },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
-    },
-    async execute(args, exec) {
-      const parent = exec.agent
-      if (parent === undefined) {
-        return 'summon_expert needs a running agent to spawn from; none is in scope.'
-      }
-      const slug = String(args.expert ?? '')
-      const task = String(args.task ?? '').trim()
-      const background = typeof args.context === 'string' ? args.context.trim() : ''
+  // One native delegation tool per expert, rather than a single `summon_expert`
+  // that takes a slug. The harness already ships `tool-subagent`, which carries a
+  // child's persona from config and handles provider capability negotiation,
+  // background execution, and the continuation channel. A second delegation path
+  // built beside it would have to maintain all of that again, worse.
+  //
+  // What the expert adds is the persona: the same `childPersona` a summon sent,
+  // installed through `tool-subagent`'s own `persona` config, which shadows
+  // `deployment:persona-prefix` on the child. Skill bundles travel inside that
+  // text, as they did before.
+  //
+  // Nine tools now carry the provider's generic description, so the tool list
+  // alone does not distinguish them. The routing section above names each one,
+  // which is where a comparative rule belongs anyway.
+  const enabled = new Set(enabledSlugs(ctx))
+  for (const expert of EXPERTS) {
+    if (!enabled.has(expert.slug)) continue
+    ctx.plugin(toolSubagent, {
+      provider,
+      toolName: `expert_${expert.slug}`,
+      persona: childPersona(expert),
+      maxDepth,
+    })
+  }
 
-      if (task === '') return 'summon_expert needs a non-empty task.'
-      const expert = expertBySlug(slug)
-      if (expert === undefined) {
-        return `No expert named ${slug}. Available: ${knownSlugs()}`
-      }
-      if (ctx.subagents.getProvider(provider) === undefined) {
-        // Naming the registered providers turns an unactionable failure into a
-        // correction the caller can make in one step.
-        const available = ctx.subagents.list()
-        const hint = available.length === 0
-          ? 'No subagent provider is registered at all.'
-          : `Registered providers: ${available.join(', ')}.`
-        return `The subagent provider ${provider} is not registered, so no expert can `
-          + `be summoned. ${hint} Set the plugin's \`provider\` config to one of them.`
-      }
-
-      // The service rejects a request naming a capability the provider does not
-      // advertise, so `persona` and `maxDepth` are sent only when supported. A
-      // provider that lacks them still gets the persona text, folded into the
-      // prompt instead, because an expert without its brief is not that expert.
-      const capabilities = ctx.subagents.getProvider(provider)?.capabilities
-      const supportsPersona = capabilities?.persona === true
-      const supportsDepth = capabilities?.depthLimit === true
-      const persona = childPersona(expert)
-
-      const run = await ctx.subagents.start(provider, {
-        prompt: supportsPersona
-          ? childPrompt(task, background)
-          : childPrompt(task, background, persona),
-        parent,
-        signal: exec.signal,
-        ...(supportsPersona ? { persona } : {}),
-        // `maxDepth: 1` means the child may not start a grandchild, so an expert
-        // cannot summon another expert even if its persona failed to say so.
-        // Only sent when the provider advertises the depth limit.
-        ...(supportsDepth ? { maxDepth } : {}),
-      })
-      try {
-        const result = await run.result
-        const answer = textOf(result.output).trim()
-
-        if (result.stopReason !== 'completed') {
-          const partial = answer === ''
-            ? ''
-            : `\n\nPartial output before it stopped:\n${answer}`
-          return `Expert ${expert.name} stopped early (${result.stopReason}).${partial}`
-        }
-        if (answer === '') {
-          return `Expert ${expert.name} returned no text.`
-        }
-        return [
-          `# ${expert.name}`,
-          '',
-          answer,
-          '',
-          '---',
-          'This is one specialist perspective, not a verdict. Verify it before relying on it.',
-        ].join('\n')
-      } finally {
-        // Idempotent, and the release matters for a local run: the child session
-        // stays alive otherwise, one per summon.
-        await run.dispose()
-      }
-    },
-  }))
 }

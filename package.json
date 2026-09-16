@@ -55,7 +55,9 @@
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "@types/node": "^26.5.1",
-    "@types/react": "^19.3.0"
+    "@types/react": "^19.3.0",
+    "react": "link:../../deepseek-harness/node_modules/.pnpm/react@18.3.1/node_modules/react",
+    "react-dom": "link:../../deepseek-harness/node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom"
   },
   "_comment_react": "react is a required peer, never a dependency: the shell provides the single React instance, and a private copy makes every hook call fail across the boundary.",
   "peerDependencies": {
@@ -70,7 +72,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.6-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": ">=0.1.6-alpha.1",
     "@deepseek-ai/dsh-typert-registry": ">=0.1.6-alpha.1",
-    "react": ">=18"
+    "@deepseek-ai/dsh-tool-subagent": ">=0.1.6-alpha.1",
+    "react": "^18.3.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -104,6 +107,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-typert-registry": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-subagent": {
       "optional": true
     }
   }

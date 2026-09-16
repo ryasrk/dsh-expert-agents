@@ -5,7 +5,7 @@
  * A template is a routing table, not a script. It names the stages in order and
  * the expert that fills each, so the orchestrator knows who to summon next and
  * what the stage must produce. Nothing here calls an expert: the orchestrator
- * does, through `summon_expert`.
+ * does, through that expert's own delegation tool.
  *
  * Four chains rather than one, because the stage count is a cost. The evidence
  * for that, and for why each stage exists, is `docs/workflow-research.md`; the
