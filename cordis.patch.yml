@@ -1,0 +1,18 @@
+# Read by `dsh plugin add` and merged into the target profile.
+#
+# Two rows, and the split is deliberate:
+#
+#   `expert-agents` (this file) registers the Host half: the expert catalog and
+#   the two model-facing tools. It must be its own row so the Loader can mount
+#   and dispose it independently.
+#
+#   `expert-agents-remote` registers ONLY the Remote service, as a separate
+#   top-level row. The api-gateway discovers Remote routes from the ROOT service
+#   table, so a Remote registration nested inside another plugin's scope is
+#   invisible to it and the Settings page gets a service it cannot reach. This
+#   is the one structural detail that silently produces a mounted-but-empty UI.
+- insert:
+    - id: expert-agents-remote
+      name: 'dsh-expert-agents/remote'
+    - id: expert-agents
+      name: 'dsh-expert-agents'
