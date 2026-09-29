@@ -97,14 +97,24 @@ function parser<Output>(schema: {
   }
 }
 
-/** One strict codec over a schemastery schema. */
+/**
+ * One strict codec over a schemastery schema.
+ *
+ * The boundary schema is materialized on first use, not at module load: a codec
+ * carries the *recipe* so each process realm builds the schema it validates
+ * with. Building it eagerly would pin the Host's realm into a module the browser
+ * half also imports, which is exactly the coupling the lazy factory removes.
+ */
 function codec<Output>(schema: {
   '~standard': { validate(value: unknown): unknown }
 }): TypertCodec {
+  let cached: TypertSchema | undefined
   return {
     mode: 'strict',
     typeSymbol: 'ExpertAgentsPayload',
-    schema: parser<Output>(schema) as TypertSchema,
+    create(): TypertSchema {
+      return (cached ??= parser<Output>(schema) as TypertSchema)
+    },
   }
 }
 

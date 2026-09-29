@@ -22,7 +22,7 @@
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 // Type-only: pulls the `ctx.subagents` and `ctx.tools` augmentations.
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -43,12 +43,28 @@ export interface Config {
   provider: string
   /** How many experts one parent may nest; 1 stops an expert summoning another. */
   maxDepth: number
+  /**
+   * The experts the user has left enabled.
+   *
+   * Volatile so the Experts settings page can own it: the form is the projection
+   * of this one field, and the Remote row reads the same value back through
+   * `describe`. It lives in Config rather than in a settings namespace because
+   * 0.2.0 keeps one owner per value — the profile entry — and the revision that
+   * guards concurrent writes is derived from it.
+   */
+  enabled: Volatile<string[]>
 }
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   provider: z.string().default('spawn'),
   maxDepth: z.natural().default(1),
+  // The roster is the default so a fresh install is usable: an expert the user
+  // has to discover and switch on is an expert that does not get used.
+  enabled: z.array(z.string()).default(EXPERTS.map(expert => expert.slug)).volatile(),
 })
+
+/** Plain options accepted by callers that construct a Config by hand. */
+export type Options = { [K in keyof Config]?: Config[K] extends Volatile<infer T> ? T : never }
 
 /** The package directory, so assets resolve wherever the plugin is installed. */
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -178,25 +194,39 @@ function knownSlugs(): string {
  */
 function enabledSlugs(ctx: Context): string[] {
   const fallback = EXPERTS.map(expert => expert.slug)
-  const settings = (ctx as { settings?: { get(ns: string): unknown } }).settings
-  if (settings === undefined) return fallback
   let stored: unknown
   try {
-    stored = settings.get(SETTINGS_NAMESPACE)
+    // `describe` is the sanctioned read for another entry's live value: it
+    // answers every uniquely addressed entry by id, whether or not a user has
+    // ever written it. The Remote row owns this entry, so this is a cross-entry
+    // read rather than a read of a value this row was handed.
+    const descriptor = ctx.settings
+      .describe({ redactSecrets: true })
+      .find(candidate => candidate.ns === SETTINGS_NAMESPACE)
+    stored = (descriptor?.value as { enabled?: unknown } | undefined)?.enabled
   } catch {
     return fallback
   }
-  const enabled = (stored as { enabled?: unknown } | undefined)?.enabled
-  if (!Array.isArray(enabled)) return fallback
+  if (!Array.isArray(stored)) return fallback
   // Intersect with the roster so a stale slug in the document cannot be
   // reported as a live stage owner.
   const known = new Set(fallback)
-  return enabled.filter((slug): slug is string => typeof slug === 'string' && known.has(slug))
+  return stored.filter((slug): slug is string => typeof slug === 'string' && known.has(slug))
 }
 
 export function apply(ctx: Context, config: Config = {} as Config): void {
   const provider = config.provider ?? 'spawn'
   const maxDepth = config.maxDepth ?? 1
+
+  // This plugin ships its own Experts settings page, so the generic
+  // schema-generated form must stay off: both would claim this one entry and
+  // the user would get two editors for the same field. `inject` keeps the
+  // plugin running when Settings is absent or mounts later, and passing
+  // `ctx.fiber` names THIS row as the policy's owner — the Remote row is a
+  // separate entry and cannot speak for it.
+  ctx.inject(['settings'], child => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
 
   // Routing between these three tools is comparative, so it belongs in a prompt
   // section rather than in any one description: a tool cannot usefully describe when

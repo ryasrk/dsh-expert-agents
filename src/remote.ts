@@ -24,37 +24,30 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import { catalogPayload } from './index.ts'
 import { EXPERTS } from './experts.ts'
-import { INVOCATIONS, PACKAGE, SETTINGS_NAMESPACE, SERVICE, settingsSchema } from './contract.ts'
+import { INVOCATIONS, PACKAGE, SETTINGS_NAMESPACE, SERVICE } from './contract.ts'
 
 /**
- * A minimal `parse`-shaped wrapper over a schemastery schema.
+ * The stored `enabled` array for this plugin's entry.
  *
- * The Typert codec contract requires `{ parse(value) }`, while schemastery
- * validates through Standard Schema. Wrapping keeps one schema definition
- * instead of a parallel hand-written validator, so a field added here is
- * validated at the boundary without a second edit.
+ * 0.2.0 removed `settings.register`: namespaces are gone, and a form is the
+ * projection of a profile entry's own volatile Config fields. `SETTINGS_NAMESPACE`
+ * is therefore the ENTRY ID this Remote row owns, and reads/writes go through
+ * `describe`/`mutate` on that entry. Reading through `describe` also keeps the
+ * single-writer property the old scope handle had: the value is whatever the
+ * profile composition currently resolves to, never a snapshot captured at mount.
+ *
+ * @param settings - the Host settings service.
+ * @returns the stored slugs, or `undefined` when the entry is absent or unreadable.
  */
-function codec<Output>(schema: {
-  '~standard': {
-    validate(value: unknown): unknown
-  }
-}): { parse(value: unknown): Output } {
-  return {
-    parse(value: unknown): Output {
-      // Standard Schema permits an async validator; these schemas are all
-      // synchronous, so an async result is a programming error rather than a
-      // value to await at a synchronous codec boundary.
-      const result = schema['~standard'].validate(value) as
-        | { value: Output }
-        | { issues: readonly unknown[] }
-      if ('issues' in result) {
-        // The codec contract has no issue channel, so a rejected boundary value
-        // must throw. JSON-stringifying the issues keeps the path visible.
-        throw new TypeError(`expert-agents codec rejected a value: ${JSON.stringify(result.issues)}`)
-      }
-      return result.value
-    },
-  }
+function storedSlugs(settings: {
+  describe(options?: { redactSecrets?: boolean }): readonly { ns: string; value: unknown }[]
+}): string[] | undefined {
+  const descriptor = settings.describe({ redactSecrets: true })
+    .find(candidate => candidate.ns === SETTINGS_NAMESPACE)
+  const enabled = (descriptor?.value as { enabled?: unknown } | undefined)?.enabled
+  return Array.isArray(enabled)
+    ? enabled.filter((slug): slug is string => typeof slug === 'string')
+    : undefined
 }
 
 /**
@@ -79,23 +72,9 @@ const DEFAULT_ENABLED = EXPERTS.map(expert => expert.slug)
 export default class ExpertAgentsRemote extends TypertRemoteService {
   static inject = ['settings', 'typert']
 
-  /** The registered namespace handle, present once `settings` is available. */
-  private settings: { get(): { enabled: string[] } } | undefined
-
   constructor(ctx: Context) {
     super(ctx, SERVICE)
     ctx.typert.register(TYPERT)
-    // Registering the namespace is what makes it readable and writable:
-    // `settings.get` returns undefined for an unregistered namespace, and
-    // `settings.mutate` rejects one. The base supplies the default so a fresh
-    // install needs no stored document.
-    ctx.inject(['settings'], settingsCtx => {
-      this.settings = settingsCtx.settings.register(
-        SETTINGS_NAMESPACE,
-        settingsSchema,
-        { base: { enabled: [...DEFAULT_ENABLED] } },
-      )
-    })
   }
 
   /**
@@ -109,10 +88,10 @@ export default class ExpertAgentsRemote extends TypertRemoteService {
    */
   async getState() {
     const known = new Set(DEFAULT_ENABLED)
-    const stored = this.settings?.get()?.enabled
-    const enabled = Array.isArray(stored)
-      ? stored.filter((slug): slug is string => typeof slug === 'string' && known.has(slug))
-      : DEFAULT_ENABLED
+    const stored = storedSlugs(this.ctx.settings)
+    const enabled = stored === undefined
+      ? DEFAULT_ENABLED
+      : stored.filter(slug => known.has(slug))
     return { enabled, revision: this.revision(), experts: await catalogPayload() }
   }
 
@@ -134,14 +113,14 @@ export default class ExpertAgentsRemote extends TypertRemoteService {
     return await this.getState()
   }
 
-  /** The current revision of this plugin's settings namespace. */
+  /** The current revision of this plugin's settings entry. */
   private revision(): number {
     const descriptor = this.ctx.settings
-      .describe()
+      .describe({ redactSecrets: true })
       .find(candidate => candidate.ns === SETTINGS_NAMESPACE)
     if (descriptor === undefined) {
-      // The namespace only appears once something is stored. Revision 0 is
-      // correct for that state, and a read must not fail over it.
+      // The entry is absent until it has been mounted with a volatile field.
+      // Revision 0 is correct for that state, and a read must not fail over it.
       return 0
     }
     return descriptor.revision
